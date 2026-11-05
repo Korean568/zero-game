@@ -3,14 +3,13 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>0이 사라졌다</title>
+<title>Zero has disappeared</title>
 <style>
   :root {
     --navy: #131c33; --navy2: #1f2c4d; --gold: #ffc53d; --coral: #ff5d47; --paper: #fffaf0; --mute: #9fb0cc;
     --font: "Malgun Gothic", "Apple SD Gothic Neo", "Noto Sans KR", sans-serif;
     color-scheme: dark;
   }
-  @media (prefers-reduced-motion: reduce) { .hole { animation: none; } }
   button:focus-visible { outline: 3px solid var(--paper); outline-offset: 3px; }
   * { box-sizing: border-box; margin: 0; }
   [hidden] { display: none !important; }
@@ -31,9 +30,7 @@
   #title { position: fixed; inset: 0; z-index: 20; display: flex; flex-direction: column; justify-content: center; padding: 0 0 0 8vw; max-width: 720px; transition: opacity .7s, transform .9s; opacity: 0; pointer-events: none; }
   #title.ready { opacity: 1; pointer-events: auto; }
   #title.hide { opacity: 0; pointer-events: none; transform: translateX(-60px); }
-  #title h1 { font-size: clamp(52px, 8.4vw, 118px); font-weight: 900; line-height: 1.05; letter-spacing: -.03em; display: flex; align-items: center; flex-wrap: wrap; text-shadow: 0 4px 30px rgba(0,0,0,.5); }
-  .hole { display: inline-block; width: .62em; height: .86em; border: .085em dashed var(--gold); border-radius: 50%; margin-right: .08em; animation: flick 2.6s infinite; }
-  @keyframes flick { 0%,100% { opacity: 1 } 46% { opacity: 1 } 50% { opacity: .25 } 54% { opacity: 1 } 60% { opacity: .5 } 64% { opacity: 1 } }
+  #title h1 { font-size: clamp(44px, 6.2vw, 88px); font-weight: 900; line-height: 1.05; letter-spacing: -.03em; display: flex; align-items: center; flex-wrap: wrap; text-shadow: 0 4px 30px rgba(0,0,0,.5); }
   #story { margin: 22px 0 28px; font-size: clamp(15px, 1.5vw, 20px); line-height: 1.75; color: #dbe4f5; text-shadow: 0 2px 10px rgba(0,0,0,.8); }
   #startBtn { align-self: flex-start; font: 900 clamp(18px, 1.8vw, 24px) var(--font); color: var(--navy); background: var(--gold); border: 0; border-radius: 16px; padding: 16px 38px; cursor: pointer; box-shadow: 0 6px 0 #b9851a; transition: transform .1s, box-shadow .1s; }
   #startBtn:hover { transform: translateY(-2px); box-shadow: 0 8px 0 #b9851a; }
@@ -165,7 +162,7 @@
 <div id="loading">세상을 만드는 중…</div>
 
 <section id="title">
-  <h1><span class="hole"></span>이 사라졌다</h1>
+  <h1>Zero has disappeared</h1>
   <div id="story"></div>
   <button id="startBtn">0 찾으러 떠나기</button>
   <div id="bestTitle"></div>
