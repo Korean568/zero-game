@@ -16,7 +16,9 @@
     const s = Math.floor(t), m = Math.floor(s / 60);
     return `${String(m).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
   };
-  const READING = ['일', '십', '백', '천', '만', '십만', '백만', '천만', '1억'];
+  // 1 뒤에 0이 n개 붙은 수의 이름: 1, 10, 100, 1000, 1만, 10만 … 1정, 10정
+  const UNITS = ['', '만', '억', '조', '경', '해', '자', '양', '구', '간', '정'];
+  const numberName = (n) => (n < 4 ? String(10 ** n) : String(10 ** (n % 4)) + UNITS[Math.floor(n / 4)]);
 
   /* ---------- 소리 ---------- */
   const Snd = {
@@ -60,9 +62,9 @@
       while (this.next < c.currentTime + 0.3) {
         const i = this.step, ch = chords[Math.floor(i / 8) % 4], n = found.length;
         this.tone(midi(ch[[0, 1, 2, 1][i % 4]] + 12), 0.22, 'triangle', 0.045, this.next);
-        if (n >= 2 && i % 4 === 0) this.tone(midi(ch[0] - 12), 0.5, 'sine', 0.11, this.next);
-        if (n >= 4 && mel[i % 32]) this.tone(midi(mel[i % 32]), 0.24, 'square', 0.022, this.next);
-        if (n >= 6 && i % 2 === 1) this.hat(this.next, 0.05);
+        if (n >= 5 && i % 4 === 0) this.tone(midi(ch[0] - 12), 0.5, 'sine', 0.11, this.next);
+        if (n >= 15 && mel[i % 32]) this.tone(midi(mel[i % 32]), 0.24, 'square', 0.022, this.next);
+        if (n >= 30 && i % 2 === 1) this.hat(this.next, 0.05);
         this.next += spb; this.step++;
       }
     },
@@ -101,7 +103,11 @@
   /* ---------- 상태 ---------- */
   let state = 'title'; // title | dive | play | quiz | card | ending | result
   let elapsed = 0, fooled = 0, mistakes = 0, shownSec = -1;
-  const found = [];     // 찾은 대륙 번호
+  const found = [];     // 찾은 0마다 그 대륙 번호를 넣는다
+  const TOTAL = Object.values(D.COUNTS).reduce((a, b) => a + b, 0);
+  const foundIn = (id) => found.filter((c) => c === id).length;
+  const contDone = (id) => foundIn(id) >= D.COUNTS[id];
+  const allFound = () => found.length >= TOTAL;
   const items = [];
   const satTarget = [1, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 1];
   const NI = ll2v(0, 0);
@@ -143,48 +149,64 @@
     m.root.position.copy(dir).multiplyScalar(R + h + 2.2);
     m.root.quaternion.setFromRotationMatrix(World.frameAt(dir));
     scene.add(m.root);
-    items.push({ real, type, dir, cont, root: m.root, spin: m.spin, zero: real ? m : null, taken: false, phase: Math.random() * 6 });
+    items.push({ real, type, dir, hintDir: real ? fuzzyDir(dir) : null, cont, root: m.root, spin: m.spin, zero: real ? m : null, taken: false, phase: Math.random() * 6 });
   }
 
-  // 지도만 보고 찾아오면 바로 줍지 못하도록, 진짜 곁에 가짜를 둔다
-  function addDecoysAround(center, id, nextType) {
+  // 지도는 대략적인 범위만 알려 준다. 진짜 0은 원의 가운데가 아니라 원 안 어딘가에 있다.
+  const HINT_R = 50;
+  function fuzzyDir(dir) {
+    const north = tangentNorth(dir, V()), east = V().crossVectors(north, dir).normalize();
+    const a = Math.random() * 6.28, r = Math.random() * HINT_R * 0.62 / R;
+    return dir.clone().addScaledVector(north, Math.cos(a) * r).addScaledVector(east, Math.sin(a) * r).normalize();
+  }
+
+  // 지도 범위에 도착해도 모양을 살펴야 하도록, 진짜 곁에 알파벳 O를 둔다
+  function addDecoyNear(center, id) {
     const north = tangentNorth(center, V()), east = V().crossVectors(north, center).normalize();
     const start = Math.random() * 6.28;
-    let placed = 0;
-    for (let i = 0; i < 10 && placed < 2; i++) {
-      const a = start + i * 1.1, r = (8 + Math.random() * 6) / R;
+    for (let i = 0; i < 10; i++) {
+      const a = start + i * 1.1, r = (8 + Math.random() * 8) / R;
       const d = center.clone().addScaledVector(north, Math.cos(a) * r).addScaledVector(east, Math.sin(a) * r).normalize();
       if (heightAt(d) < 0.5 || !clearOfColliders(d, 1.5)) continue;
-      addItem(false, placed === 0 ? 'letter' : nextType(), d, id);
-      placed++;
+      addItem(false, 'letter', d, id);
+      return;
     }
   }
 
-  const realSpot = {};
+  // 대륙 안의 빈 땅 한 곳. 다른 물건과 되도록 떨어뜨리고, 자리가 없으면 간격을 줄인다.
+  function randomLand(id, away) {
+    const d = V();
+    for (const sep of [30, 16, 6]) {
+      for (let t = 0; t < 5000; t++) {
+        const y = Math.random() * 2 - 1, a = Math.random() * 6.28, s = Math.sqrt(1 - y * y);
+        d.set(s * Math.cos(a), y, s * Math.sin(a));
+        if (contAt(d) !== id || heightAt(d) < 1 || !clearOfColliders(d, 4)) continue;
+        if (d.angleTo(up) * R < 30 || away.some((o) => o.angleTo(d) * R < sep)) continue;
+        return d.clone();
+      }
+    }
+    return null;
+  }
+
   function setupItems() {
     const types = Object.keys(D.DECOYS);
     let t = Math.floor(Math.random() * types.length);
     const nextType = () => types[t++ % types.length];
     for (let id = 1; id <= 7; id++) {
       const spots = shuffle(World.landmarks.filter((l) => l.cont === id && D.SPOTS[id].some((s) => s.key === l.key)));
+      const count = D.COUNTS[id], used = [];
+      const addReal = (d) => { used.push(d); addItem(true, null, d, id); addDecoyNear(d, id); };
+      // 진짜의 절반쯤은 랜드마크 곁에, 나머지는 벌판에 숨는다. 랜드마크 하나는 가짜 몫으로 남긴다.
+      const atSpots = Math.min(spots.length - 1, Math.ceil(count / 2));
       spots.forEach((l, i) => {
-        const spot = placeNear(l);
-        if (i === 0) {
-          realSpot[id] = l;
-          addItem(true, null, spot, id);
-          addDecoysAround(spot, id, nextType);
-        } else addItem(false, nextType(), spot, id);
+        const d = placeNear(l);
+        if (i < atSpots) addReal(d);
+        else { used.push(d); addItem(false, nextType(), d, id); }
       });
-      // 벌판 곳곳의 가짜
-      let placed = 0, tries = 0;
-      const d = V();
-      while (placed < 5 && tries++ < 8000) {
-        const y = Math.random() * 2 - 1, a = Math.random() * 6.28, s = Math.sqrt(1 - y * y);
-        d.set(s * Math.cos(a), y, s * Math.sin(a));
-        if (contAt(d) !== id || heightAt(d) < 1 || !clearOfColliders(d, 4)) continue;
-        if (d.angleTo(up) * R < 30) continue;
-        addItem(false, nextType(), d.clone(), id);
-        placed++;
+      for (let i = atSpots; i < count; i++) addReal(randomLand(id, used) || placeNear(spots[0]));
+      for (let i = 0; i < 4; i++) {
+        const d = randomLand(id, used);
+        if (d) { used.push(d); addItem(false, nextType(), d, id); }
       }
     }
   }
@@ -236,10 +258,9 @@
 
   /* ---------- 화면 표시 ---------- */
   function renderNumber() {
-    let html = '<b class="one">1</b>';
-    for (let i = 0; i < 8; i++) html += i < found.length ? '<b class="zero">0</b>' : '<span class="gone big"></span>';
-    $('number').innerHTML = html;
-    $('reading').textContent = READING[found.length];
+    const n = found.length;
+    $('number').innerHTML = '<b class="one">1</b>' + (n ? `<b class="zero">0</b><small>×${n}</small>` : '<span class="gone big"></span>');
+    $('reading').textContent = `${numberName(n)} · ${n}/${TOTAL + 1}개`;
     drawMapBase();
   }
   let toastTimer = 0;
@@ -258,10 +279,10 @@
   }
   function setHint() {
     let html;
-    if (found.length >= 7) html = `<em>마지막 0</em>${Z('위도 0°, 경도 0°. 지도의 ★로 가자.')}`;
-    else if (curCont > 0 && found.includes(curCont)) html = `<em>${D.CONTINENTS[curCont].name}</em>이 대륙의 0은 이미 찾았다. 지도의 다른 ✕로 가자.`;
-    else if (curCont > 0) html = `<em>${D.CONTINENTS[curCont].name}</em>지도에서 이 대륙의 ✕를 찾아가자.`;
-    else html = '<em>바다</em>지도를 보고 ✕가 있는 대륙으로 항해하자.';
+    if (allFound()) html = `<em>마지막 0</em>${Z('위도 0°, 경도 0°. 지도의 ★로 가자.')}`;
+    else if (curCont > 0 && contDone(curCont)) html = `<em>${D.CONTINENTS[curCont].name} 완료</em>이 대륙의 0을 모두 찾았다. 다른 대륙의 빨간 원으로 가자.`;
+    else if (curCont > 0) html = `<em>${D.CONTINENTS[curCont].name} ${foundIn(curCont)}/${D.COUNTS[curCont]}</em>지도의 빨간 원 안 어딘가에 0이 숨어 있다.`;
+    else html = '<em>바다</em>지도의 빨간 원이 있는 대륙으로 항해하자.';
     $('hint').innerHTML = html;
   }
 
@@ -281,7 +302,7 @@
         const i = gy * World.W + Math.floor((x + 0.5) / BW * World.W), o = (y * BW + x) * 4;
         const land = World.heightGrid[i] > 0, id = World.contGrid[i];
         let c = [28, 62, 104];
-        if (land) c = id === 0 ? [240, 214, 140] : found.includes(id) ? [111, 201, 110] : [176, 184, 196];
+        if (land) c = id === 0 ? [240, 214, 140] : contDone(id) ? [111, 201, 110] : [176, 184, 196];
         img.data[o] = c[0]; img.data[o + 1] = c[1]; img.data[o + 2] = c[2]; img.data[o + 3] = 255;
       }
     }
@@ -292,7 +313,7 @@
     (90 - Math.asin(clamp(d.y, -1, 1)) / Math.PI * 180) / 180 * BH,
   ];
   const wrapX = (dx) => ((dx + BW / 2) % BW + BW) % BW - BW / 2;
-  const mapTargets = () => (found.length >= 7 ? [NI] : items.filter((it) => it.real && !it.taken).map((it) => it.dir));
+  const mapTargets = () => (allFound() ? [NI] : items.filter((it) => it.real && !it.taken).map((it) => it.hintDir));
 
   const aheadDir = V();
   function paintMap(g, cw, ch, zoom, labels, time) {
@@ -310,30 +331,28 @@
       for (const id in D.CONTINENTS) {
         const c = D.CONTINENTS[id];
         const [x, y] = project((c.label[0] + 180) / 360 * BW, (90 - c.label[1]) / 180 * BH);
-        const t = c.name + (found.includes(+id) ? ' ✓' : '');
+        const t = c.name + (contDone(+id) ? ' ✓' : ` ${foundIn(+id)}/${D.COUNTS[id]}`);
         g.lineWidth = cw / 140; g.strokeStyle = 'rgba(10,20,40,.75)'; g.strokeText(t, x, y);
         g.fillStyle = '#fff'; g.fillText(t, x, y);
       }
     }
 
-    const s = cw / 60;
+    const pxPerDeg = BW / 360 * k, ry = HINT_R / R * 180 / Math.PI * pxPerDeg;
     for (const d of mapTargets()) {
       const [bx, by] = toBase(d);
       const [x, y] = project(bx, by);
-      if (found.length >= 7) {
+      if (allFound()) {
         g.font = `${cw / 20 + Math.sin(time * 5) * 3}px sans-serif`;
         g.strokeStyle = '#1b2233'; g.lineWidth = cw / 160; g.fillStyle = '#ffd34d';
         g.strokeText('★', x, y); g.fillText('★', x, y);
         continue;
       }
-      g.lineCap = 'round';
-      for (const [color, width] of [['#fff', cw / 70], ['#e5281c', cw / 150]]) {
-        g.strokeStyle = color; g.lineWidth = width;
-        g.beginPath();
-        g.moveTo(x - s, y - s); g.lineTo(x + s, y + s);
-        g.moveTo(x + s, y - s); g.lineTo(x - s, y + s);
-        g.stroke();
-      }
+      // 평면 지도라 고위도일수록 가로로 늘어난다
+      const rx = Math.min(ry / Math.max(Math.sqrt(1 - d.y * d.y), 0.15), ry * 5);
+      g.beginPath();
+      g.ellipse(x, y, rx, ry, 0, 0, Math.PI * 2);
+      g.fillStyle = 'rgba(229,40,28,.26)'; g.fill();
+      g.strokeStyle = '#e5281c'; g.lineWidth = Math.max(1.5, cw / 320); g.stroke();
     }
 
     const [hx, hy] = project(px, py);
@@ -346,10 +365,10 @@
     g.restore();
   }
   function drawMaps(time) {
-    // ✕ 근처에 오면 구석 지도가 자동으로 확대된다
+    // 빨간 원 근처에 오면 구석 지도가 자동으로 확대된다
     let near = Infinity;
     for (const d of mapTargets()) near = Math.min(near, d.angleTo(up) * R);
-    mapZoom += ((near < 140 ? 5 : 1) - mapZoom) * 0.12;
+    mapZoom += ((near < 70 ? 5 : 1) - mapZoom) * 0.12;
     paintMap(mapG, mapC.width, mapC.height, mapZoom, mapZoom < 1.5, time);
     if (bigOpen) paintMap(bigG, bigC.width, bigC.height, 1, true, time);
   }
@@ -430,9 +449,9 @@
       });
     });
 
-    $('tips').innerHTML = '<div>왼쪽 조이스틱으로 이동, 끝까지 밀면 달리기</div><div>화면을 끌면 시점이 돌아간다</div><div>지도 버튼의 ✕로 가서 세로로 길쭉한 0을 줍자</div>';
+    $('tips').innerHTML = '<div>왼쪽 조이스틱으로 이동, 끝까지 밀면 달리기</div><div>화면을 끌면 시점이 돌아간다</div><div>지도 버튼의 빨간 원 안에서 세로로 길쭉한 0을 찾아 줍자</div>';
     $('prompt').textContent = '줍기 버튼: 정체불명의 동그라미';
-    $('bigMapNote').textContent = '✕ 0이 숨은 곳 · 빨간 화살표 현재 위치 · 지도 버튼으로 닫기';
+    $('bigMapNote').textContent = '빨간 원 안 어딘가에 0이 있다 · 화살표는 현재 위치 · 지도 버튼으로 닫기';
   }
 
   function resize() {
@@ -460,11 +479,28 @@
     it.zero.spin.rotation.set(0, 0, 0);
     followers.push({ root: it.root, spin: it.zero.spin, dir: it.dir.clone(), fwd: face.clone(), hop: followers.length * 0.7 });
     it.root.scale.setScalar(0.75);
-    found.push(it.cont);
-    satTarget[it.cont] = 1;
+    if (followers.length > 8) it.root.traverse((o) => { o.castShadow = false; }); // 긴 행렬의 그림자는 생략해 프레임을 지킨다
+    const id = it.cont, first = foundIn(id) === 0;
+    found.push(id);
+    satTarget[id] = 0.2 + 0.8 * foundIn(id) / D.COUNTS[id];
     renderNumber();
+    setHint();
     Snd.get();
-    showCard(it.cont);
+    if (first) showCard(id);   // 역사 이야기는 대륙마다 첫 0에서 한 번씩
+    else announceProgress(id);
+  }
+
+  function announceProgress(id) {
+    const name = D.CONTINENTS[id].name;
+    if (allFound()) {
+      banner('마지막 0이 부른다');
+      toast('일곱 대륙의 색이 모두 돌아왔다. 이제 지도의 ★, <b>세상의 원점</b>으로!', 5000);
+    } else if (contDone(id)) {
+      banner(`${name} 완료`);
+      toast(`${name}의 0을 모두 찾았다. 지금 세상의 수는 <b>${numberName(found.length)}</b>`);
+    } else {
+      toast(`${name} ${foundIn(id)}/${D.COUNTS[id]} · 지금 세상의 수는 <b>${numberName(found.length)}</b>`);
+    }
   }
 
   function pickUp() {
@@ -473,7 +509,6 @@
     it.taken = true;
     it.root.visible = false;
     fooled++; elapsed += 10;
-    burst(it.root.position, '#9aa7b8', 40, 9);
     Snd.wrong();
     toast(`<b class="bad">가짜!</b> ${D.DECOYS[it.type]} <i>${Z('+10초')}</i>`, 3800);
   }
@@ -483,8 +518,7 @@
     $('cardPlace').textContent = f.place;
     $('cardTitle').textContent = f.title;
     $('cardBody').innerHTML = Z(f.body);
-    const num = '1' + '0'.repeat(found.length);
-    $('cardNum').textContent = Number(num).toLocaleString('en-US');
+    $('cardNum').textContent = numberName(found.length);
     $('cardNumLabel').textContent = `${found.length}번째 0을 찾았다! 세상에 이 수가 돌아왔다`;
     $('card').classList.add('show');
     state = 'card';
@@ -496,10 +530,6 @@
     if (performance.now() - cardOpenAt < 350) return;
     $('card').classList.remove('show');
     state = 'play';
-    if (found.length === 7) {
-      banner('마지막 0이 부른다');
-      toast('일곱 대륙의 색이 모두 돌아왔다. 이제 지도의 ★, <b>세상의 원점</b>으로!', 5000);
-    }
   }
 
   /* ---------- 이동 ---------- */
@@ -538,7 +568,7 @@
       walkPhase += dt * Math.min(speed, 24) * 0.75;
       if (!trail.length || trail[trail.length - 1].angleTo(up) * R > 0.35) {
         trail.push(up.clone());
-        if (trail.length > 140) trail.shift();
+        if (trail.length > 340) trail.shift();
       }
     }
     for (const c of colliders) {
@@ -573,8 +603,8 @@
     }
     const nearNull = NI.angleTo(up) * R < 13;
     if (nearNull && !atNull) {
-      if (found.length >= 7) openQuiz(() => startEnding(), () => toast('마지막 문제를 풀어야 0이 돌아온다. 섬을 나갔다 다시 들어오면 새 문제가 나온다.', 4500));
-      else { banner('널 아일랜드'); toast(Z(`여기는 위도 0°, 경도 0°, 세상의 원점. 일곱 대륙의 0을 모은 뒤 다시 오자. (지금 ${found.length}개)`), 5000); }
+      if (allFound()) openQuiz(() => startEnding(), () => toast('마지막 문제를 풀어야 0이 돌아온다. 섬을 나갔다 다시 들어오면 새 문제가 나온다.', 4500));
+      else { banner('널 아일랜드'); toast(Z(`여기는 위도 0°, 경도 0°, 세상의 원점. 일곱 대륙의 0을 모은 뒤 다시 오자. (지금 ${found.length}/${TOTAL}개)`), 5000); }
     }
     atNull = nearNull;
   }
@@ -601,7 +631,7 @@
   function updateFollowers(dt, time) {
     followers.forEach((f, i) => {
       const idx = trail.length - 1 - (i + 1) * 8;
-      if (idx >= 0) fTarget.copy(trail[idx]); else fTarget.copy(up);
+      fTarget.copy(idx >= 0 ? trail[idx] : trail[0] || up);
       fDelta.copy(fTarget).sub(f.dir);
       f.dir.lerp(fTarget, 1 - Math.exp(-dt * 7)).normalize();
       fDelta.addScaledVector(f.dir, -fDelta.dot(f.dir));
@@ -716,7 +746,7 @@
   const SPACING = 2.75;
 
   function lineDir(i, out) {
-    const off = (i - 4) * SPACING;
+    const off = (i - (followers.length + 1) / 2) * SPACING;
     return out.copy(NI).addScaledVector(endX, off / R).normalize();
   }
 
@@ -726,7 +756,9 @@
     tangentNorth(NI, endF).negate();           // 남쪽(카메라 방향)
     endX.crossVectors(NI, endF).normalize();
     const top = R + heightAt(NI);
-    endCam.copy(NI).multiplyScalar(top + 7.5).addScaledVector(endF, 30);
+    const lineW = (followers.length + 2) * SPACING;
+    const back = clamp(lineW / (2 * Math.tan(camera.fov * Math.PI / 360) * camera.aspect) * 1.08, 30, 190);
+    endCam.copy(NI).multiplyScalar(top + 7 + back * 0.2).addScaledVector(endF, back);
     endLook.copy(NI).multiplyScalar(top + 2.8);
     endFrom.copy(camera.position);
     const z = World.makeZero();
@@ -753,7 +785,7 @@
     const lineE = sstep(0.1, 1.5, endT);
     lineDir(0, lt);
     up.copy(hero.fromDir).lerp(lt, lineE).normalize();
-    hero.root.position.copy(up).multiplyScalar(R + heightAt(up));
+    hero.root.position.copy(up).multiplyScalar(R + Math.max(heightAt(up), 0));
     orient(hero.root, endF, up);
     hero.boat.visible = false; hero.legs[0].visible = hero.legs[1].visible = true;
     hero.body.position.y = 0; hero.body.scale.set(1, 1, 1); hero.body.rotation.x = 0;
@@ -764,19 +796,19 @@
       const s = mix(0.75, 1, lineE);
       f.root.scale.setScalar(s);
       const dance = endT > 3.2 ? Math.abs(Math.sin(time * 5 + i * 0.5)) * 0.7 : 0;
-      f.root.position.copy(f.dir).multiplyScalar(R + heightAt(f.dir) + 1.95 + dance);
+      f.root.position.copy(f.dir).multiplyScalar(R + Math.max(heightAt(f.dir), 0) + 1.95 + dance);
       orient(f.root, endF, f.dir);
     });
     if (endT > 3.2) hero.body.position.y = Math.abs(Math.sin(time * 5)) * 0.7;
 
     // 여덟 번째 0이 하늘에서 떨어진다
-    lineDir(8, lt);
+    lineDir(followers.length + 1, lt);
     const fallT = clamp((endT - 1.2) / 1.1, 0, 1);
     const fallY = (1 - fallT * fallT) * 90;
     const sc = mix(5, 1, fallT);
     finalZero.root.scale.setScalar(sc);
     const dance8 = endT > 3.2 ? Math.abs(Math.sin(time * 5 + 4)) * 0.7 : 0;
-    finalZero.root.position.copy(lt).multiplyScalar(R + heightAt(lt) + 1.95 * sc + fallY + dance8);
+    finalZero.root.position.copy(lt).multiplyScalar(R + Math.max(heightAt(lt), 0) + 1.95 * sc + fallY + dance8);
     orient(finalZero.root, endF, lt);
 
     if (fallT >= 1 && !restoredDone) {
@@ -787,11 +819,11 @@
       setHint();
       $('timer').innerHTML = fmtTime(elapsed);
       Snd.win();
-      banner('100,000,000');
+      banner(numberName(found.length));
     }
     if (restoredDone && endT < 30 && time > nextFirework) {
       nextFirework = time + 0.42;
-      lt.copy(NI).addScaledVector(endX, (Math.random() - 0.5) * 50 / R).addScaledVector(endF, -Math.random() * 15 / R).normalize().multiplyScalar(R + 16 + Math.random() * 18);
+      lt.copy(NI).addScaledVector(endX, (Math.random() - 0.5) * 110 / R).addScaledVector(endF, -Math.random() * 15 / R).normalize().multiplyScalar(R + 16 + Math.random() * 18);
       burst(lt, ['#ff5d47', '#ffd34d', '#6fd6f0', '#a7f070', '#ff8fd0'][Math.floor(Math.random() * 5)], 80, 16);
       Snd.tone(900 + Math.random() * 500, 0.1, 'sine', 0.02);
     }
@@ -809,7 +841,7 @@
       best = isNaN(prev) ? elapsed : Math.min(prev, elapsed);
       localStorage.setItem('zero-best', String(best));
     } catch (e) { /* 저장 불가 환경에서는 기록만 생략 */ }
-    const rank = elapsed < 360 ? '0의 화신' : elapsed < 600 ? '세계 일주 수학자' : elapsed < 900 ? '믿음직한 탐험가' : '느긋한 여행자';
+    const rank = elapsed < 1200 ? '0의 화신' : elapsed < 1800 ? '세계 일주 수학자' : elapsed < 2700 ? '믿음직한 탐험가' : '느긋한 여행자';
     $('rTime').textContent = fmtTime(elapsed);
     $('rFooled').textContent = fooled + '번';
     $('rMistakes').textContent = mistakes + '번';
@@ -914,7 +946,6 @@
     get nearItem() { return nearItem; }, press(code) { keys[code] = true; }, release(code) { keys[code] = false; },
     pick() { pickUp(); }, close() { cardOpenAt = 0; closeCard(); }, start() { startGame(); },
     skipDive() { diveT = 1; }, setPitch(p) { pitch = p; }, setDist(d) { dist = d; }, turn(a) { camFwd.applyAxisAngle(up, a); },
-    realSpots() { return Object.fromEntries(Object.entries(realSpot).map(([k, v]) => [k, v.key])); },
     renderer, scene, camera, get perfLevel() { return perfLevel; },
     tick(frames = 1, dt = 1 / 60) { for (let i = 0; i < frames; i++) step(dt); },
     aim(dir) { camFwd.copy(dir).addScaledVector(up, -dir.dot(up)).normalize(); face.copy(camFwd); },

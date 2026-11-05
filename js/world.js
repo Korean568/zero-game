@@ -799,7 +799,7 @@ window.World = (function () {
 
   /* ---------- 캐릭터·아이템 ---------- */
   function lambert(color, extra) { return new THREE.MeshLambertMaterial({ color, ...extra }); }
-  const ZERO_MAT = lambert('#e3ab35'); // 빛나지 않는 무광 재질
+  const ZERO_MAT = lambert('#a98a4a'); // 빛나 보이지 않게 어두운 무광 색
 
   function ovalGeo(rx, ry, hx, hy, depth) {
     const s = new THREE.Shape();
