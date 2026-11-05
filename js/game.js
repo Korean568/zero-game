@@ -923,5 +923,7 @@
     get followers() { return followers.length; }, get curCont() { return curCont; },
   };
 
-  setTimeout(init, 40);
+  // 오프닝이 재생될 때는 지형 생성을 먼저 끝낸다. 오프닝 도중에 만들면 그동안 영상이 멈춘다.
+  if (document.querySelector('iframe[title="CLKKY STUDIO"]')) init();
+  else setTimeout(init, 40);
 })();
