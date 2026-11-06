@@ -1,7 +1,7 @@
 // 행성 지형, 하늘·바다, 나무, 랜드마크, 캐릭터 모델.
 window.World = (function () {
   const D = window.GameData;
-  const R = 360;          // 행성 반지름 (대륙 넓이를 좌우한다)
+  const R = 986;          // 행성 반지름 (대륙 넓이를 좌우한다. 360일 때보다 넓이 7.5배)
   const W = 1800, H = 900; // 지형 격자 해상도
   const RAD = Math.PI / 180;
 
@@ -158,17 +158,17 @@ window.World = (function () {
         const nx = v.x, ny = v.y, nz = v.z;
         const wu = (fbm(nx * 5 + 3, ny * 5, nz * 5, 2) - 0.5) * 33;
         const wv = (fbm(nx * 5, ny * 5 + 9, nz * 5, 2) - 0.5) * 33;
-        const m = sampleArr(mask, x + 0.5 + wu, y + 0.5 + wv) + (fbm(nx * 24, ny * 24, nz * 24, 2) - 0.5) * 0.22;
+        const m = sampleArr(mask, x + 0.5 + wu, y + 0.5 + wv) + (fbm(nx * 60, ny * 60, nz * 60, 2) - 0.5) * 0.22;
         const land = sstep(0.3, 0.7, m);
         const t = (land - 0.5) * 2;
         let h;
         if (t < 0) {
           h = t * 9;
         } else {
-          const hills = fbm(nx * 12, ny * 12, nz * 12, 3);
+          const hills = fbm(nx * 30, ny * 30, nz * 30, 3);
           const mm = sampleArr(mtn, x + 0.5, y + 0.5);
-          const ridge = 1 - Math.abs(fbm(nx * 20 + 5, ny * 20, nz * 20, 3) * 2 - 1);
-          h = t * (0.9 + hills * 3.4) + t * mm * (1.5 + ridge * ridge * 10);
+          const ridge = 1 - Math.abs(fbm(nx * 50 + 5, ny * 50, nz * 50, 3) * 2 - 1);
+          h = t * (0.9 + hills * 3.4) + t * mm * (2 + ridge * ridge * 16);
         }
         heightGrid[i] = h;
       }
@@ -228,7 +228,7 @@ window.World = (function () {
 
   const tmpC = new THREE.Color();
   function faceColor(d, h, slope) {
-    const j = vnoise(d.x * 70, d.y * 70, d.z * 70) - 0.5;
+    const j = vnoise(d.x * 180, d.y * 180, d.z * 180) - 0.5;
     const b = biomeAt(d, h);
     if (h < 0) tmpC.copy(PAL.shelf).lerp(PAL.deep, sstep(0, 7, -h));
     else if (h < 0.55) tmpC.copy(PAL.sand);
@@ -247,7 +247,21 @@ window.World = (function () {
     return tmpC;
   }
 
-  // 삼각형을 정육면체 면의 N×N 칸으로 나눈다. 보이는 칸만 그려서 내장 그래픽에서도 돌아가게 한다.
+  /* ---------- 지형: 정육면체 구 타일 ---------- */
+  // 정육면체 여섯 면을 NC×NC 칸으로 나눈다. 칸 4×4개를 한 덩어리로 묶어 거친 지형을 그리고,
+  // 플레이어 가까운 칸만 고운 타일로 그때그때 만들어 거친 칸 대신 보여 준다.
+  const NC = 24, GROUP = 4, COARSE_Q = 6, SKIRT = 6;
+  let FINE_Q = 32, FINE_RANGE = 230;
+  const FACES = [
+    [[1, 0, 0], [0, 0, -1], [0, 1, 0]], [[-1, 0, 0], [0, 0, 1], [0, 1, 0]],
+    [[0, 1, 0], [1, 0, 0], [0, 0, -1]], [[0, -1, 0], [1, 0, 0], [0, 0, 1]],
+    [[0, 0, 1], [1, 0, 0], [0, 1, 0]], [[0, 0, -1], [-1, 0, 0], [0, 1, 0]],
+  ];
+  function cubeDir(f, s, t, out) {
+    const [n, u, v] = FACES[f], a = Math.tan(s * Math.PI / 4), b = Math.tan(t * Math.PI / 4);
+    return out.set(n[0] + u[0] * a + v[0] * b, n[1] + u[1] * a + v[1] * b, n[2] + u[2] * a + v[2] * b).normalize();
+  }
+  // 구름 묶음용: 가장 큰 축으로 면을 고르는 간단한 칸 번호
   function cubeCell(x, y, z, N) {
     const ax = Math.abs(x), ay = Math.abs(y), az = Math.abs(z);
     let f, u, v;
@@ -257,71 +271,125 @@ window.World = (function () {
     const cu = Math.min(N - 1, Math.floor((u + 1) / 2 * N)), cv = Math.min(N - 1, Math.floor((v + 1) / 2 * N));
     return f * N * N + cu * N + cv;
   }
-  function chunkTris(attrs, N) {
-    const pos = attrs.position.array, tris = pos.length / 9;
-    const cells = new Int32Array(tris), counts = new Int32Array(6 * N * N);
-    for (let t = 0; t < tris; t++) {
-      const i = t * 9;
-      cells[t] = cubeCell(pos[i] + pos[i + 3] + pos[i + 6], pos[i + 1] + pos[i + 4] + pos[i + 7], pos[i + 2] + pos[i + 5] + pos[i + 8], N);
-      counts[cells[t]]++;
+
+  const tv = [new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()];
+  const tm = new THREE.Vector3(), te1 = new THREE.Vector3(), te2 = new THREE.Vector3(), tdir = new THREE.Vector3();
+  // 칸 하나를 q×q 격자로 만든다. skirt: 가장자리에 아래로 늘어뜨린 벽을 붙여 이웃 칸과의 틈을 가린다.
+  function cellTris(f, i, j, q, skirt) {
+    const n = q + 1, dirs = new Float32Array(n * n * 3), hs = new Float32Array(n * n);
+    for (let y = 0; y < n; y++) for (let x = 0; x < n; x++) {
+      cubeDir(f, ((i + x / q) / NC) * 2 - 1, ((j + y / q) / NC) * 2 - 1, tdir);
+      const k = y * n + x;
+      dirs[k * 3] = tdir.x; dirs[k * 3 + 1] = tdir.y; dirs[k * 3 + 2] = tdir.z;
+      hs[k] = heightAt(tdir);
     }
-    const names = Object.keys(attrs), outs = [], offs = new Int32Array(counts.length);
-    for (let c = 0; c < counts.length; c++) {
-      const o = {};
-      for (const name of names) o[name] = new Float32Array(counts[c] * 3 * attrs[name].size);
-      outs.push(o);
+    const tris = q * q * 2 + (skirt ? q * 8 : 0);
+    const pos = new Float32Array(tris * 9), col = new Float32Array(tris * 9), cont = new Float32Array(tris * 3);
+    let o = 0;
+    const ks = [0, 0, 0], drop = [0, 0, 0];
+    function emit(a, da, b, db, c, dc) {
+      ks[0] = a; ks[1] = b; ks[2] = c; drop[0] = da; drop[1] = db; drop[2] = dc;
+      let hsum = 0, cnt = 0, hmin = Infinity, hmax = -Infinity;
+      tm.set(0, 0, 0);
+      for (let v = 0; v < 3; v++) {
+        const k = ks[v], h = hs[k];
+        tv[v].set(dirs[k * 3], dirs[k * 3 + 1], dirs[k * 3 + 2]);
+        tm.add(tv[v]);
+        tv[v].multiplyScalar(R + h - (drop[v] ? SKIRT : 0));
+        if (!drop[v]) { hsum += h; cnt++; if (h < hmin) hmin = h; if (h > hmax) hmax = h; }
+      }
+      te1.subVectors(tv[1], tv[0]); te2.subVectors(tv[2], tv[0]); te1.cross(te2);
+      const flip = te1.dot(tv[0]) < 0; // 바깥을 보게 감는 방향을 맞춘다
+      tm.normalize();
+      const hm = hsum / cnt, color = faceColor(tm, hm, hmax - hmin), id = hm > -1 ? contAt(tm) : 0;
+      for (let v = 0; v < 3; v++) {
+        const src = tv[flip && v ? 3 - v : v], p = o * 9 + v * 3;
+        pos[p] = src.x; pos[p + 1] = src.y; pos[p + 2] = src.z;
+        col[p] = color.r; col[p + 1] = color.g; col[p + 2] = color.b;
+        cont[o * 3 + v] = id;
+      }
+      o++;
     }
-    for (let t = 0; t < tris; t++) {
-      const c = cells[t], o = offs[c]++;
-      for (const name of names) {
-        const a = attrs[name], n = a.size * 3, src = t * n, dst = o * n, out = outs[c][name];
-        for (let k = 0; k < n; k++) out[dst + k] = a.array[src + k];
+    for (let y = 0; y < q; y++) for (let x = 0; x < q; x++) {
+      const k00 = y * n + x, k10 = k00 + 1, k01 = k00 + n, k11 = k01 + 1;
+      emit(k00, 0, k10, 0, k11, 0);
+      emit(k00, 0, k11, 0, k01, 0);
+    }
+    if (skirt) {
+      for (let x = 0; x < q; x++) {
+        for (const row of [0, q]) { const a = row * n + x, b = a + 1; emit(a, 0, b, 0, b, 1); emit(a, 0, b, 1, a, 1); }
+        for (const colm of [0, q]) { const a = x * n + colm, b = a + n; emit(a, 0, b, 0, b, 1); emit(a, 0, b, 1, a, 1); }
       }
     }
-    const geos = [];
-    for (let c = 0; c < counts.length; c++) {
-      if (!counts[c]) continue;
-      const g = new THREE.BufferGeometry();
-      for (const name of names) g.setAttribute(name, new THREE.BufferAttribute(outs[c][name], attrs[name].size));
-      geos.push(g);
-    }
-    return geos;
+    return { pos, col, cont };
   }
 
-  let planetMat = null;
-  function buildPlanet(detail, N, lod) {
-    const geo = new THREE.IcosahedronGeometry(1, detail);
-    const pos = geo.attributes.position.array, n = pos.length / 3;
-    const col = new Float32Array(n * 3), cont = new Float32Array(n);
-    const a = new THREE.Vector3(), b = new THREE.Vector3(), c = new THREE.Vector3(), m = new THREE.Vector3();
-    for (let f = 0; f < n; f += 3) {
-      const i = f * 3;
-      a.set(pos[i], pos[i + 1], pos[i + 2]); b.set(pos[i + 3], pos[i + 4], pos[i + 5]); c.set(pos[i + 6], pos[i + 7], pos[i + 8]);
-      const ha = heightAt(a), hb = heightAt(b), hc = heightAt(c);
-      m.copy(a).add(b).add(c).normalize();
-      const hm = (ha + hb + hc) / 3;
-      const color = faceColor(m, hm, Math.max(ha, hb, hc) - Math.min(ha, hb, hc));
-      const id = hm > -1 ? contAt(m) : 0;
-      for (let k = 0; k < 3; k++) {
-        col[(f + k) * 3] = color.r; col[(f + k) * 3 + 1] = color.g; col[(f + k) * 3 + 2] = color.b;
-        cont[f + k] = id;
+  const groups = [], cellList = [], fineTiles = new Map();
+  let coarseMat = null, fineMat = null;
+  function buildCoarse() {
+    coarseMat = patchSat(new THREE.MeshLambertMaterial({ vertexColors: true }));
+    fineMat = patchSat(new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide }));
+    const NG = NC / GROUP;
+    for (let f = 0; f < 6; f++) for (let gi = 0; gi < NG; gi++) for (let gj = 0; gj < NG; gj++) {
+      const parts = [], cells = [];
+      let verts = 0;
+      for (let ci = 0; ci < GROUP; ci++) for (let cj = 0; cj < GROUP; cj++) {
+        const i = gi * GROUP + ci, j = gj * GROUP + cj, t = cellTris(f, i, j, COARSE_Q, false);
+        const cell = { f, i, j, key: `${f},${i},${j}`, start: verts, count: t.pos.length / 3, fine: false, dir: cubeDir(f, ((i + 0.5) / NC) * 2 - 1, ((j + 0.5) / NC) * 2 - 1, new THREE.Vector3()) };
+        cells.push(cell); cellList.push(cell); parts.push(t);
+        verts += cell.count;
       }
-      pos[i] = a.x * (R + ha); pos[i + 1] = a.y * (R + ha); pos[i + 2] = a.z * (R + ha);
-      pos[i + 3] = b.x * (R + hb); pos[i + 4] = b.y * (R + hb); pos[i + 5] = b.z * (R + hb);
-      pos[i + 6] = c.x * (R + hc); pos[i + 7] = c.y * (R + hc); pos[i + 8] = c.z * (R + hc);
-    }
-    if (!planetMat) planetMat = patchSat(new THREE.MeshLambertMaterial({ vertexColors: true }));
-    const geos = chunkTris({ position: { array: pos, size: 3 }, color: { array: col, size: 3 }, aCont: { array: cont, size: 1 } }, N);
-    geo.dispose();
-    for (const g of geos) {
+      const pos = new Float32Array(verts * 3), col = new Float32Array(verts * 3), cont = new Float32Array(verts);
+      let o = 0;
+      for (const t of parts) { pos.set(t.pos, o * 3); col.set(t.col, o * 3); cont.set(t.cont, o); o += t.pos.length / 3; }
+      const g = new THREE.BufferGeometry();
+      g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+      g.setAttribute('color', new THREE.BufferAttribute(col, 3));
+      g.setAttribute('aCont', new THREE.BufferAttribute(cont, 1));
       g.computeVertexNormals();
+      const idx = new Uint16Array(verts);
+      for (let k = 0; k < verts; k++) idx[k] = k;
+      const ia = new THREE.BufferAttribute(idx, 1);
+      ia.setUsage(THREE.DynamicDrawUsage);
+      g.setIndex(ia);
       g.computeBoundingSphere();
-      const mesh = new THREE.Mesh(g, planetMat);
-      mesh.receiveShadow = lod === 'near';
+      const mesh = new THREE.Mesh(g, coarseMat);
       mesh.matrixAutoUpdate = false;
-      cullables.push({ obj: mesh, dir: g.boundingSphere.center.clone().normalize(), margin: g.boundingSphere.radius / R, lod });
       scene_.add(mesh);
+      const group = { mesh, geo: g, idx, cells, dirty: false, dir: g.boundingSphere.center.clone().normalize(), margin: g.boundingSphere.radius / R };
+      cells.forEach((c) => { c.group = group; });
+      groups.push(group);
     }
+  }
+  // 고운 타일이 생긴 칸은 거친 덩어리에서 그 칸의 삼각형만 빼고 그린다
+  function rebuildIndex(group) {
+    let n = 0;
+    for (const c of group.cells) if (!c.fine) for (let k = 0; k < c.count; k++) group.idx[n++] = c.start + k;
+    group.geo.index.needsUpdate = true;
+    group.geo.setDrawRange(0, n);
+    group.dirty = false;
+  }
+  function buildFine(cell) {
+    const t = cellTris(cell.f, cell.i, cell.j, FINE_Q, true);
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.BufferAttribute(t.pos, 3));
+    g.setAttribute('color', new THREE.BufferAttribute(t.col, 3));
+    g.setAttribute('aCont', new THREE.BufferAttribute(t.cont, 1));
+    g.computeVertexNormals();
+    g.computeBoundingSphere();
+    const mesh = new THREE.Mesh(g, fineMat);
+    mesh.receiveShadow = true;
+    mesh.matrixAutoUpdate = false;
+    scene_.add(mesh);
+    fineTiles.set(cell.key, { mesh, cell });
+    cell.fine = true; cell.group.dirty = true;
+  }
+  function dropFine(key) {
+    const t = fineTiles.get(key);
+    scene_.remove(t.mesh);
+    t.mesh.geometry.dispose();
+    fineTiles.delete(key);
+    t.cell.fine = false; t.cell.group.dirty = true;
   }
 
   /* ---------- 지오메트리 조립기 ---------- */
@@ -616,7 +684,7 @@ window.World = (function () {
   function buildProps(colliders) {
     const groups = { conifer: [], broad: [], jungle: [], palm: [], cactus: [], rock: [], ice: [] };
     const d = new THREE.Vector3();
-    for (let i = 0, n = lite ? 30000 : 60000; i < n; i++) {
+    for (let i = 0, n = lite ? 120000 : 300000; i < n; i++) {
       const y = rnd() * 2 - 1, a = rnd() * Math.PI * 2, s = Math.sqrt(1 - y * y);
       d.set(s * Math.cos(a), y, s * Math.sin(a));
       const h = heightAt(d);
@@ -624,7 +692,7 @@ window.World = (function () {
       let blocked = false;
       for (const l of landmarks) if (d.dot(l.dir) > Math.cos((l.r + 4) / R)) { blocked = true; break; }
       if (blocked) continue;
-      const b = biomeAt(d, h), n = vnoise(d.x * 26, d.y * 26, d.z * 26), r = rnd();
+      const b = biomeAt(d, h), n = vnoise(d.x * 70, d.y * 70, d.z * 70), r = rnd();
       let kind = null;
       if (b === 1) { if (r < 0.1) kind = 'ice'; }
       else if (b === 2) { if (r < 0.1) kind = 'rock'; else if (r < 0.2) kind = 'conifer'; }
@@ -660,7 +728,7 @@ window.World = (function () {
     }
   }
 
-  // 지평선 너머의 나무는 인스턴스 목록에서 뺀다. 우주에서 볼 때는 6그루 중 1그루만.
+  // 지평선 너머의 나무는 인스턴스 목록에서 뺀다. 우주에서 볼 때는 10그루 중 1그루만.
   const lastPropCam = new THREE.Vector3(1e9, 0, 0);
   function updateProps(camDir, cosMax, thin) {
     for (const s of propSets) {
@@ -679,33 +747,48 @@ window.World = (function () {
   }
 
   const camDir_ = new THREE.Vector3();
+  // 매 프레임: 고운 타일을 만들고 지우고, 지평선 너머를 감춘다
+  const want = [];
   function cull(camPos) {
     const dist = camPos.length();
     camDir_.copy(camPos).divideScalar(dist);
-    const far = dist - R > 110; // 멀리서는 저해상도 행성을 쓴다
-    // 카메라에서 보이는 지평선 각도 + 산 높이만큼 여유
-    const horizon = Math.acos(Math.min(1, R / dist)) + Math.acos(R / (R + 16));
-    for (const c of cullables) {
-      if (c.lod && (c.lod === 'far') !== far) { c.obj.visible = false; continue; }
-      c.obj.visible = camDir_.dot(c.dir) > Math.cos(Math.min(Math.PI, horizon + c.margin));
+    const alt = dist - R, far = alt > 110;
+    const horizon = Math.acos(Math.min(1, R / dist)) + Math.acos(R / (R + 18));
+
+    const nearOK = alt < 200, cosNear = Math.cos(FINE_RANGE / R), cosDrop = Math.cos((FINE_RANGE + 90) / R);
+    fineTiles.forEach((t, key) => { if (!nearOK || camDir_.dot(t.cell.dir) < cosDrop) dropFine(key); });
+    if (nearOK) {
+      want.length = 0;
+      for (const c of cellList) {
+        if (c.fine) continue;
+        const dot = camDir_.dot(c.dir);
+        if (dot > cosNear) want.push([dot, c]);
+      }
+      want.sort((a, b) => b[0] - a[0]);
+      for (let k = 0; k < Math.min(2, want.length); k++) buildFine(want[k][1]); // 한 프레임에 두 칸씩
     }
+    for (const g of groups) {
+      if (g.dirty) rebuildIndex(g);
+      g.mesh.visible = camDir_.dot(g.dir) > Math.cos(Math.min(Math.PI, horizon + g.margin));
+    }
+    for (const c of cullables) c.obj.visible = camDir_.dot(c.dir) > Math.cos(Math.min(Math.PI, horizon + c.margin));
     if (lastPropCam.distanceToSquared(camPos) > 16) {
       lastPropCam.copy(camPos);
-      const reach = far ? horizon + 0.14 : Math.min(horizon + 0.14, 0.5);
-      updateProps(camDir_, Math.cos(Math.min(Math.PI, reach)), far ? 6 : 1);
+      const reach = far ? horizon + 0.1 : Math.min(horizon + 0.05, 200 / R);
+      updateProps(camDir_, Math.cos(Math.min(Math.PI, reach)), far ? 10 : 1);
     }
     atmosphere_.visible = uniforms.uSpace.value > 0.01;
   }
 
   function buildClouds() {
     const cells = {};
-    for (let i = 0; i < 200; i++) {
+    for (let i = 0; i < 700; i++) {
       const y = rnd() * 1.6 - 0.8, a = rnd() * 6.28, s = Math.sqrt(1 - y * y);
       const dir = new THREE.Vector3(s * Math.cos(a), y, s * Math.sin(a));
       const frame = frameAt(dir, rnd() * 6.28);
       frame.setPosition(dir.clone().multiplyScalar(R + 30 + rnd() * 10));
       const size = 2.2 + rnd() * 3;
-      const key = cubeCell(dir.x, dir.y, dir.z, 4);
+      const key = cubeCell(dir.x, dir.y, dir.z, 5);
       const b = cells[key] || (cells[key] = new Builder());
       b.within(frame, () => {
         b.ball(size, '#ffffff', 0, 0, 0, 1.6, 0.6, 1, 1);
@@ -746,15 +829,29 @@ window.World = (function () {
           col+=vec3(1.,.95,.8)*pow(max(dot(reflect(-uSun,N),V),0.),48.)*.55;
           gl_FragColor=vec4(col,.84); }`,
     });
-    const ico = new THREE.IcosahedronGeometry(R, lite ? 34 : 50);
-    for (const g of chunkTris({ position: { array: ico.attributes.position.array, size: 3 } }, 6)) {
+    // 지형 덩어리와 같은 칸 나눔으로 바다를 쪼개 지평선 너머는 그리지 않는다
+    const NG = NC / GROUP, q = 16, a = new THREE.Vector3(), b = new THREE.Vector3(), c = new THREE.Vector3(), d = new THREE.Vector3();
+    for (let f = 0; f < 6; f++) for (let gi = 0; gi < NG; gi++) for (let gj = 0; gj < NG; gj++) {
+      const pos = new Float32Array(q * q * 18);
+      let o = 0;
+      const at = (x, y, out) => cubeDir(f, ((gi + x / q) / NG) * 2 - 1, ((gj + y / q) / NG) * 2 - 1, out).multiplyScalar(R);
+      const tri = (p1, p2, p3) => {
+        te1.subVectors(p2, p1); te2.subVectors(p3, p1); te1.cross(te2);
+        const list = te1.dot(p1) < 0 ? [p1, p3, p2] : [p1, p2, p3];
+        for (const p of list) { pos[o++] = p.x; pos[o++] = p.y; pos[o++] = p.z; }
+      };
+      for (let y = 0; y < q; y++) for (let x = 0; x < q; x++) {
+        at(x, y, a); at(x + 1, y, b); at(x + 1, y + 1, c); at(x, y + 1, d);
+        tri(a, b, c); tri(a, c, d);
+      }
+      const g = new THREE.BufferGeometry();
+      g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
       g.computeBoundingSphere();
       const mesh = new THREE.Mesh(g, mat);
       mesh.matrixAutoUpdate = false;
       cullables.push({ obj: mesh, dir: g.boundingSphere.center.clone().normalize(), margin: g.boundingSphere.radius / R });
       scene_.add(mesh);
     }
-    ico.dispose();
   }
 
   function buildSky() {
@@ -899,9 +996,9 @@ window.World = (function () {
   function init(scene, opts = {}) {
     scene_ = scene;
     lite = !!opts.lite;
+    if (lite) { FINE_Q = 20; FINE_RANGE = 170; }
     bakeTerrain();
-    buildPlanet(lite ? 100 : 150, 12, 'near');
-    buildPlanet(lite ? 48 : 70, 3, 'far');
+    buildCoarse();
     const colliders = buildLandmarks();
     buildProps(colliders);
     buildClouds();

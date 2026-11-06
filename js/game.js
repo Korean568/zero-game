@@ -12,6 +12,7 @@
   /* ---------- 사라진 0 표시 ---------- */
   let restored = false;
   const Z = (s) => (restored ? String(s) : String(s).replace(/0/g, '<span class="gone"></span>'));
+  const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const fmtTime = (t) => {
     const s = Math.floor(t), m = Math.floor(s / 60);
     return `${String(m).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
@@ -101,7 +102,7 @@
   let colliders, sky;
 
   /* ---------- 상태 ---------- */
-  let state = 'title'; // title | dive | play | quiz | card | ending | result
+  let state = 'title'; // title | dive | play | talk | quiz | card | ending | result
   let elapsed = 0, fooled = 0, mistakes = 0, shownSec = -1;
   const found = [];     // 찾은 0마다 그 대륙 번호를 넣는다
   const TOTAL = Object.values(D.COUNTS).reduce((a, b) => a + b, 0);
@@ -112,11 +113,13 @@
   const satTarget = [1, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 1];
   const NI = ll2v(0, 0);
 
-  const up = ll2v(35.8, 127.2);
+  const up = ll2v(37.15, 127.05);
+  const SPAWN = up.clone();
   const camFwd = V(), face = V(), sunT = V();
   let pitch = 0.42, dist = 15, air = 0, vy = 0, groundSm = 0, walkPhase = 0, moving = false, onWater = false;
-  let dragging = false, nearItem = null, curCont = -1, atNull = false;
+  let dragging = false, quizItem = null, nearItem = null, curCont = -1, atNull = false;
   const keys = {};
+  const visited = new Set(); // 이야기를 이미 본 대륙
   const joy = { x: 0, y: 0, sprint: false }; // 터치 조이스틱 입력
   const hero = World.makeOne();
   scene.add(hero.root);
@@ -130,11 +133,11 @@
   }
 
   /* ---------- 아이템 배치 ---------- */
-  const shuffle = (a) => { for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; };
+  const shuffle = (a, rnd = Math.random) => { for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(rnd() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; };
   const clearOfColliders = (d, m) => colliders.every((c) => d.angleTo(c.dir) * R > c.r + m);
 
   function placeNear(l) {
-    const start = Math.random() * 6.28, r = l.r + 3.6;
+    const start = rng() * 6.28, r = l.r + 3.6;
     for (let i = 0; i < 14; i++) {
       const a = start + i * 0.45;
       const d = V().set(Math.cos(a) * r, 0, Math.sin(a) * r).applyMatrix4(l.frame).normalize();
@@ -149,23 +152,35 @@
     m.root.position.copy(dir).multiplyScalar(R + h + 2.2);
     m.root.quaternion.setFromRotationMatrix(World.frameAt(dir));
     scene.add(m.root);
-    items.push({ real, type, dir, hintDir: real ? fuzzyDir(dir) : null, cont, root: m.root, spin: m.spin, zero: real ? m : null, taken: false, phase: Math.random() * 6 });
+    items.push({ real, type, dir, hintDir: real ? fuzzyDir(dir) : null, cont, root: m.root, spin: m.spin, zero: real ? m : null, taken: false, phase: rng() * 6 });
+  }
+
+  // 같은 시드면 누구에게나 같은 배치가 나온다 (mulberry32)
+  let rng = Math.random;
+  function seeded(seed) {
+    let a = seed >>> 0;
+    return () => {
+      a = (a + 0x6D2B79F5) >>> 0;
+      let t = Math.imul(a ^ (a >>> 15), 1 | a);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
   }
 
   // 지도는 대략적인 범위만 알려 준다. 진짜 0은 원의 가운데가 아니라 원 안 어딘가에 있다.
-  const HINT_R = 50;
+  const HINT_R = 90;
   function fuzzyDir(dir) {
     const north = tangentNorth(dir, V()), east = V().crossVectors(north, dir).normalize();
-    const a = Math.random() * 6.28, r = Math.random() * HINT_R * 0.62 / R;
+    const a = rng() * 6.28, r = rng() * HINT_R * 0.62 / R;
     return dir.clone().addScaledVector(north, Math.cos(a) * r).addScaledVector(east, Math.sin(a) * r).normalize();
   }
 
   // 지도 범위에 도착해도 모양을 살펴야 하도록, 진짜 곁에 알파벳 O를 둔다
   function addDecoyNear(center, id) {
     const north = tangentNorth(center, V()), east = V().crossVectors(north, center).normalize();
-    const start = Math.random() * 6.28;
+    const start = rng() * 6.28;
     for (let i = 0; i < 10; i++) {
-      const a = start + i * 1.1, r = (8 + Math.random() * 8) / R;
+      const a = start + i * 1.1, r = (8 + rng() * 8) / R;
       const d = center.clone().addScaledVector(north, Math.cos(a) * r).addScaledVector(east, Math.sin(a) * r).normalize();
       if (heightAt(d) < 0.5 || !clearOfColliders(d, 1.5)) continue;
       addItem(false, 'letter', d, id);
@@ -176,24 +191,25 @@
   // 대륙 안의 빈 땅 한 곳. 다른 물건과 되도록 떨어뜨리고, 자리가 없으면 간격을 줄인다.
   function randomLand(id, away) {
     const d = V();
-    for (const sep of [30, 16, 6]) {
+    for (const sep of [60, 30, 10]) {
       for (let t = 0; t < 5000; t++) {
-        const y = Math.random() * 2 - 1, a = Math.random() * 6.28, s = Math.sqrt(1 - y * y);
+        const y = rng() * 2 - 1, a = rng() * 6.28, s = Math.sqrt(1 - y * y);
         d.set(s * Math.cos(a), y, s * Math.sin(a));
         if (contAt(d) !== id || heightAt(d) < 1 || !clearOfColliders(d, 4)) continue;
-        if (d.angleTo(up) * R < 30 || away.some((o) => o.angleTo(d) * R < sep)) continue;
+        if (d.angleTo(SPAWN) * R < 30 || away.some((o) => o.angleTo(d) * R < sep)) continue;
         return d.clone();
       }
     }
     return null;
   }
 
-  function setupItems() {
+  function setupItems(seed) {
+    rng = seeded(seed);
     const types = Object.keys(D.DECOYS);
-    let t = Math.floor(Math.random() * types.length);
+    let t = Math.floor(rng() * types.length);
     const nextType = () => types[t++ % types.length];
     for (let id = 1; id <= 7; id++) {
-      const spots = shuffle(World.landmarks.filter((l) => l.cont === id && D.SPOTS[id].some((s) => s.key === l.key)));
+      const spots = shuffle(World.landmarks.filter((l) => l.cont === id && D.SPOTS[id].some((s) => s.key === l.key)), rng);
       const count = D.COUNTS[id], used = [];
       const addReal = (d) => { used.push(d); addItem(true, null, d, id); addDecoyNear(d, id); };
       // 진짜의 절반쯤은 랜드마크 곁에, 나머지는 벌판에 숨는다. 랜드마크 하나는 가짜 몫으로 남긴다.
@@ -204,11 +220,12 @@
         else { used.push(d); addItem(false, nextType(), d, id); }
       });
       for (let i = atSpots; i < count; i++) addReal(randomLand(id, used) || placeNear(spots[0]));
-      for (let i = 0; i < 4; i++) {
+      for (let i = 0; i < 8; i++) {
         const d = randomLand(id, used);
         if (d) { used.push(d); addItem(false, nextType(), d, id); }
       }
     }
+    rng = Math.random;
   }
 
   /* ---------- 입자 ---------- */
@@ -318,7 +335,7 @@
   const aheadDir = V();
   function paintMap(g, cw, ch, zoom, labels, time) {
     const [px, py] = toBase(up);
-    const e = clamp((zoom - 1) / 4, 0, 1), sw = BW / zoom, sh = BH / zoom;
+    const e = clamp((zoom - 1) / 8, 0, 1), sw = BW / zoom, sh = BH / zoom;
     const cx = mix(BW / 2, px, e), cy = clamp(mix(BH / 2, py, e), sh / 2, BH - sh / 2);
     const k = cw / sw, sx = cx - sw / 2, sy = cy - sh / 2;
     const project = (x, y) => [k * (wrapX(x - cx) + sw / 2), k * (y - sy)];
@@ -368,7 +385,7 @@
     // 빨간 원 근처에 오면 구석 지도가 자동으로 확대된다
     let near = Infinity;
     for (const d of mapTargets()) near = Math.min(near, d.angleTo(up) * R);
-    mapZoom += ((near < 70 ? 5 : 1) - mapZoom) * 0.12;
+    mapZoom += ((near < 140 ? 9 : 1) - mapZoom) * 0.12;
     paintMap(mapG, mapC.width, mapC.height, mapZoom, mapZoom < 1.5, time);
     if (bigOpen) paintMap(bigG, bigC.width, bigC.height, 1, true, time);
   }
@@ -379,10 +396,14 @@
 
   /* ---------- 입력 ---------- */
   window.addEventListener('keydown', (e) => {
+    if (e.target && e.target.tagName === 'INPUT') {
+      if (e.code === 'Enter') startGame(e.target.id === 'codeInput' ? 'join' : 'solo');
+      return;
+    }
     if (e.code.startsWith('Arrow') || e.code === 'Space' || e.code === 'Tab') e.preventDefault();
     if (e.repeat) return;
     keys[e.code] = true;
-    if (state === 'title' && e.code === 'Enter') startGame();
+    if (state === 'title' && e.code === 'Enter') startGame('solo');
     if (e.code === 'KeyN') Snd.toggle();
     if (state === 'card' && (e.code === 'Enter' || e.code === 'Space' || e.code === 'KeyE')) { closeCard(); return; }
     if (state === 'quiz' && e.code === 'Escape') Quiz.cancel();
@@ -407,7 +428,9 @@
   });
   window.addEventListener('wheel', (e) => { dist = clamp(dist + e.deltaY * 0.012, 8, 30); }, { passive: true });
   $('cardOk').addEventListener('click', () => closeCard());
-  $('startBtn').addEventListener('click', () => startGame());
+  $('startBtn').addEventListener('click', () => startGame('solo'));
+  $('createBtn').addEventListener('click', () => startGame('create'));
+  $('joinBtn').addEventListener('click', () => startGame('join'));
   $('againBtn').addEventListener('click', () => location.reload());
 
   /* ---------- 터치 조작 ---------- */
@@ -490,6 +513,22 @@
     else announceProgress(id);
   }
 
+  // 친구가 찾은 0: 내 행렬에는 붙지 않고 세상의 수와 대륙 색만 바뀐다
+  function applyRemoteFound(index, name, silent) {
+    const it = items[index];
+    if (!it || it.taken) return;
+    it.taken = true;
+    it.root.visible = false;
+    found.push(it.cont);
+    satTarget[it.cont] = 0.2 + 0.8 * foundIn(it.cont) / D.COUNTS[it.cont];
+    renderNumber();
+    setHint();
+    if (quizItem === it && state === 'quiz') { Quiz.cancel(); toast(`<b>${esc(name)}</b>님이 이 0을 먼저 찾았다.`); return; }
+    if (silent) return;
+    if (allFound()) announceProgress(it.cont);
+    else toast(`<b>${esc(name)}</b>님이 ${D.CONTINENTS[it.cont].name}에서 0을 찾았다 (${foundIn(it.cont)}/${D.COUNTS[it.cont]})`);
+  }
+
   function announceProgress(id) {
     const name = D.CONTINENTS[id].name;
     if (allFound()) {
@@ -505,7 +544,16 @@
 
   function pickUp() {
     const it = nearItem; if (!it) return;
-    if (it.real) { openQuiz(() => collectZero(it)); return; }
+    if (it.real) {
+      quizItem = it;
+      openQuiz(() => {
+        quizItem = null;
+        if (it.taken) { toast('친구가 먼저 찾은 0이었다.'); return; }
+        if (Net.connected) Net.send({ t: 'found', id: items.indexOf(it) });
+        else collectZero(it);
+      }, () => { quizItem = null; });
+      return;
+    }
     it.taken = true;
     it.root.visible = false;
     fooled++; elapsed += 10;
@@ -553,7 +601,7 @@
     if (moving) {
       move.normalize();
       const sprint = keys.ShiftLeft || keys.ShiftRight || joy.sprint;
-      const speed = onWater ? (sprint ? 72 : 58) : (sprint ? 38 : 25);
+      const speed = onWater ? (sprint ? 100 : 80) : (sprint ? 52 : 34);
       oldUp.copy(up);
       axis.crossVectors(up, move).normalize();
       up.applyAxisAngle(axis, speed * dt / R).normalize();
@@ -600,10 +648,27 @@
       curCont = c;
       if (c > 0) banner(D.CONTINENTS[c].name);
       setHint();
+      if (c > 0 && !visited.has(c)) {
+        visited.add(c);
+        const ch = Story.chapter(c);
+        state = 'talk';
+        banner(ch.title);
+        Story.play(ch.lines, () => { if (state === 'talk') state = 'play'; });
+        return;
+      }
     }
     const nearNull = NI.angleTo(up) * R < 13;
     if (nearNull && !atNull) {
-      if (allFound()) openQuiz(() => startEnding(), () => toast('마지막 문제를 풀어야 0이 돌아온다. 섬을 나갔다 다시 들어오면 새 문제가 나온다.', 4500));
+      if (allFound()) {
+        state = 'talk';
+        Story.play(Story.FINALE, () => {
+          state = 'play';
+          openQuiz(() => {
+            if (Net.connected) Net.send({ t: 'finale' });
+            else startEnding();
+          }, () => toast('마지막 문제를 풀어야 0이 돌아온다. 섬을 나갔다 다시 들어오면 새 문제가 나온다.', 4500));
+        });
+      }
       else { banner('널 아일랜드'); toast(Z(`여기는 위도 0°, 경도 0°, 세상의 원점. 일곱 대륙의 0을 모은 뒤 다시 오자. (지금 ${found.length}/${TOTAL}개)`), 5000); }
     }
     atNull = nearNull;
@@ -646,7 +711,7 @@
   function updateItems(dt, time, refDir) {
     for (const it of items) {
       if (it.taken) continue;
-      const vis = it.dir.dot(refDir) > 0.93;
+      const vis = it.dir.dot(refDir) > Math.cos(150 / R);
       it.root.visible = vis && state !== 'title';
       if (!vis) continue;
       it.spin.rotation.y = time * 0.6 + it.phase;
@@ -680,7 +745,7 @@
   }
   function updateSpace() {
     const alt = camera.position.length() - R;
-    const s = sstep(90, 520, alt);
+    const s = sstep(90, 1400, alt);
     World.uniforms.uSpace.value = s;
     sky.position.copy(camera.position);
     sky.userData.stars.material.opacity = s;
@@ -705,17 +770,190 @@
     updateLighting(radial, tmpV.addScaledVector(radial, -tmpV.dot(radial)).normalize());
   }
 
-  function startGame() {
-    if (state !== 'title') return;
+  let starting = false;
+  function lobbyStatus(msg, bad) {
+    const el = $('lobbyStatus');
+    el.textContent = msg;
+    el.classList.toggle('bad', !!bad);
+  }
+  function playerName() {
+    const v = $('nameInput').value.trim().slice(0, 12);
+    try { localStorage.setItem('zero-name', v); } catch (e) { /* 저장 못 해도 진행 */ }
+    return v || '숫자1';
+  }
+  async function startGame(mode) {
+    if (state !== 'title' || starting) return;
+    starting = true;
     Snd.init();
     if (Snd.ctx && Snd.ctx.state === 'suspended') Snd.ctx.resume();
+    let seed = 1 + Math.floor(Math.random() * 2147483646), welcome = null;
+    const name = playerName();
+    if (mode === 'create' || mode === 'join') {
+      const code = $('codeInput').value.trim().toUpperCase();
+      if (mode === 'join' && !/^[A-Z2-9]{4}$/.test(code)) { lobbyStatus('방 코드 4자리를 입력해 주세요.', true); starting = false; return; }
+      try {
+        welcome = await Net.connect({ name, create: mode === 'create', room: code }, (m) => lobbyStatus(m));
+      } catch (err) {
+        lobbyStatus(err.message, true);
+        starting = false;
+        return;
+      }
+      seed = welcome.seed;
+    }
+    begin(seed, welcome);
+  }
+
+  function begin(seed, welcome) {
+    setupItems(seed);
+    if (welcome) {
+      hero.body.children[0].material.color.set(welcome.color);
+      for (const p of welcome.players) addRemote(p);
+      for (const [index] of welcome.found) applyRemoteFound(index, '', true);
+      updateRoomBadge();
+    }
+    renderNumber();
     $('title').classList.add('hide');
-    state = 'dive'; diveT = 0;
-    diveFrom.copy(camera.position);
-    diveUp.copy(camera.up);
-    diveLook.copy(lookTarget);
-    document.body.classList.add('playing');
-    placeHero(0, 0);
+    Story.play(Story.prologue(!!welcome), () => {
+      state = 'dive'; diveT = 0;
+      diveFrom.copy(camera.position);
+      diveUp.copy(camera.up);
+      diveLook.copy(lookTarget);
+      document.body.classList.add('playing');
+      placeHero(0, 0);
+    });
+  }
+
+  /* ---------- 친구들 ---------- */
+  const remotes = new Map();
+  function nameTag(text, color) {
+    const c = document.createElement('canvas'); c.width = 256; c.height = 64;
+    const g2 = c.getContext('2d');
+    g2.font = '800 30px "Malgun Gothic","Apple SD Gothic Neo",sans-serif';
+    const w = Math.min(248, g2.measureText(text).width + 30);
+    g2.fillStyle = color;
+    g2.beginPath();
+    if (g2.roundRect) g2.roundRect((256 - w) / 2, 8, w, 48, 22); else g2.rect((256 - w) / 2, 8, w, 48);
+    g2.fill();
+    g2.fillStyle = '#fff'; g2.textAlign = 'center'; g2.textBaseline = 'middle';
+    g2.fillText(text, 128, 33);
+    const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(c), depthWrite: false }));
+    sp.scale.set(6, 1.5, 1);
+    sp.position.y = 5.2;
+    return sp;
+  }
+  function addRemote(p) {
+    if (!p || remotes.has(p.id) || p.id === Net.me) return;
+    const av = World.makeOne();
+    av.body.children[0].material.color.set(p.color);
+    const tag = nameTag(p.name, p.color);
+    av.root.add(tag);
+    scene.add(av.root);
+    const dir = Array.isArray(p.d) ? V().fromArray(p.d).normalize() : SPAWN.clone();
+    const fwd = Array.isArray(p.f) ? V().fromArray(p.f) : tangentNorth(dir, V());
+    remotes.set(p.id, { ...p, av, tag, dir, tdir: dir.clone(), face: fwd.clone(), tface: fwd.clone(), boat: false, moving: false, phase: 0 });
+    updateRoomBadge();
+  }
+  function removeRemote(id) {
+    const r = remotes.get(id);
+    if (!r) return;
+    scene.remove(r.av.root);
+    r.tag.material.map.dispose();
+    remotes.delete(id);
+    updateRoomBadge();
+  }
+  function updateRoomBadge() {
+    const el = $('roomBadge');
+    if (!Net.room) return;
+    el.hidden = false;
+    const names = [...remotes.values()].map((r) => esc(r.name)).join(', ');
+    el.innerHTML = Net.connected
+      ? `방 <b>${Net.room}</b> · ${remotes.size + 1}명${names ? `<small>${names}</small>` : ''}`
+      : '연결 끊김 · 혼자 계속';
+  }
+  const rTmp = V();
+  function updateRemotes(dt) {
+    const k = 1 - Math.exp(-dt * 10);
+    for (const r of remotes.values()) {
+      r.dir.lerp(r.tdir, k).normalize();
+      r.face.lerp(r.tface, k);
+      r.face.addScaledVector(r.dir, -r.face.dot(r.dir));
+      if (r.face.lengthSq() < 1e-6) tangentNorth(r.dir, r.face);
+      r.face.normalize();
+      const water = heightAt(r.dir) < -0.15;
+      r.av.root.position.copy(r.dir).multiplyScalar(R + Math.max(heightAt(r.dir), 0));
+      orient(r.av.root, r.face, r.dir);
+      r.phase += dt * (r.moving ? 14 : 0);
+      const swing = r.moving && !water ? Math.sin(r.phase) * 0.8 : 0;
+      r.av.legs[0].rotation.x = swing; r.av.legs[1].rotation.x = -swing;
+      r.av.boat.visible = water;
+      r.av.legs[0].visible = r.av.legs[1].visible = !water;
+      r.av.body.position.y = water ? 0.55 : 0;
+    }
+  }
+  let lastPosSent = 0;
+  function sendPos(time) {
+    if (!Net.connected || state === 'title' || time - lastPosSent < 0.1) return;
+    lastPosSent = time;
+    const r5 = (n) => Math.round(n * 1e5) / 1e5;
+    Net.send({ t: 'pos', d: [r5(up.x), r5(up.y), r5(up.z)], f: [r5(face.x), r5(face.y), r5(face.z)], b: onWater ? 1 : 0, m: moving ? 1 : 0 });
+  }
+  function bindNet() {
+    Net.on('pos', (m) => {
+      const r = remotes.get(m.id);
+      if (!r || !Array.isArray(m.d) || !Array.isArray(m.f)) return;
+      r.tdir.fromArray(m.d).normalize();
+      rTmp.fromArray(m.f);
+      if (rTmp.lengthSq() > 1e-6) r.tface.copy(rTmp).normalize();
+      r.moving = !!m.m;
+    });
+    Net.on('join', (m) => { addRemote(m.p); if (m.p) toast(`<b>${esc(m.p.name)}</b>님이 들어왔다.`); });
+    Net.on('leave', (m) => { removeRemote(m.id); toast(`<b>${esc(m.name)}</b>님이 나갔다.`); });
+    Net.on('found', (m) => {
+      const it = items[m.id];
+      if (!it) return;
+      if (m.by === Net.me) { if (!it.taken) collectZero(it); }
+      else applyRemoteFound(m.id, m.name);
+    });
+    Net.on('dup', () => toast('이미 친구가 찾은 0이었다.'));
+    Net.on('finale', (m) => {
+      if (state === 'ending' || state === 'result') return;
+      if (state === 'quiz') Quiz.cancel();
+      Story.close();
+      $('card').classList.remove('show');
+      if (m.by !== Net.me) toast(`<b>${esc(m.name)}</b>님이 마지막 0을 되찾았다!`, 4000);
+      startEnding();
+    });
+    Net.on('close', () => {
+      for (const id of [...remotes.keys()]) removeRemote(id);
+      updateRoomBadge();
+      toast('서버 연결이 끊겼다. 혼자 계속 찾을 수 있어요.', 5000);
+    });
+  }
+
+  // 마지막 장의 빈칸 괴물 '널'
+  const nullBeast = (() => {
+    const grp = new THREE.Group();
+    const body = new THREE.Mesh(new THREE.IcosahedronGeometry(3.4, 1), new THREE.MeshLambertMaterial({ color: '#2a2140', flatShading: true }));
+    body.castShadow = true;
+    grp.add(body);
+    const white = new THREE.MeshLambertMaterial({ color: '#ffffff' }), black = new THREE.MeshLambertMaterial({ color: '#0b0a12' });
+    for (const s of [-1, 1]) {
+      const e = new THREE.Mesh(new THREE.SphereGeometry(0.75, 12, 10), white); e.position.set(s * 1.2, 0.6, 2.9); grp.add(e);
+      const p = new THREE.Mesh(new THREE.SphereGeometry(0.36, 10, 8), black); p.position.set(s * 1.2, 0.55, 3.55); grp.add(p);
+    }
+    grp.visible = false;
+    scene.add(grp);
+    return grp;
+  })();
+  const beastSpot = V();
+  function updateNullBeast(time) {
+    const show = state !== 'title' && (allFound() || state === 'ending' || state === 'result');
+    nullBeast.visible = show;
+    if (!show) return;
+    beastSpot.copy(NI).addScaledVector(tangentNorth(NI, rTmp), 14 / R).normalize();
+    nullBeast.position.copy(beastSpot).multiplyScalar(R + 1.3 + 7 + Math.sin(time * 1.4) * 0.8);
+    nullBeast.up.copy(beastSpot);
+    nullBeast.lookAt(camera.position);
   }
 
   function updateDive(dt) {
@@ -766,6 +1004,12 @@
     scene.add(z.root);
     finalZero = z;
     z.root.position.set(0, 0, 0);
+    while (followers.length < found.length) {
+      const z = World.makeZero();
+      z.eyes.visible = true;
+      scene.add(z.root);
+      followers.push({ root: z.root, spin: z.spin, dir: NI.clone(), fwd: endF.clone(), hop: followers.length * 0.7 });
+    }
     followers.forEach((f) => { f.from = f.dir.clone(); });
     hero.fromDir = up.clone();
     moving = false;
@@ -829,7 +1073,7 @@
     }
     if (endT > 5.4 && !fired) {
       fired = true;
-      showResult();
+      Story.play(Story.epilogue(!!Net.room), showResult);
     }
   }
 
@@ -865,7 +1109,7 @@
 
     if (state === 'title') titleCam(dt);
     else if (state === 'dive') updateDive(dt);
-    else if (state === 'play' || state === 'card' || state === 'quiz') {
+    else if (state === 'play' || state === 'card' || state === 'quiz' || state === 'talk') {
       if (state === 'play') updatePlayer(dt);
       if (state === 'play' || state === 'quiz') {
         elapsed += dt;
@@ -883,6 +1127,9 @@
       updateEnding(dt, time);
       updateLighting(NI, endF);
     }
+    updateRemotes(dt);
+    updateNullBeast(time);
+    sendPos(time);
     updateItems(dt, time, state === 'ending' || state === 'result' ? NI : up);
     updateParticles(dt);
     updateSpace();
@@ -925,8 +1172,10 @@
     tangentNorth(up, sunT).applyAxisAngle(up, 2.3);
     groundSm = Math.max(heightAt(up), 0);
     hero.root.position.copy(up).multiplyScalar(R + groundSm);
-    setupItems();
     renderNumber();
+    Story.format = Z;
+    bindNet();
+    try { $('nameInput').value = localStorage.getItem('zero-name') || ''; } catch (e) { /* 이름 기억 없음 */ }
     $('timer').innerHTML = Z('00:00');
     $('story').innerHTML = D.STORY.map((s) => `<p>${Z(s)}</p>`).join('');
     try {
@@ -946,7 +1195,7 @@
     get nearItem() { return nearItem; }, press(code) { keys[code] = true; }, release(code) { keys[code] = false; },
     pick() { pickUp(); }, close() { cardOpenAt = 0; closeCard(); }, start() { startGame(); },
     skipDive() { diveT = 1; }, setPitch(p) { pitch = p; }, setDist(d) { dist = d; }, turn(a) { camFwd.applyAxisAngle(up, a); },
-    renderer, scene, camera, get perfLevel() { return perfLevel; },
+    renderer, scene, camera, net: Net, story: Story, get perfLevel() { return perfLevel; }, get remotes() { return remotes.size; },
     tick(frames = 1, dt = 1 / 60) { for (let i = 0; i < frames; i++) step(dt); },
     aim(dir) { camFwd.copy(dir).addScaledVector(up, -dir.dot(up)).normalize(); face.copy(camFwd); },
     snapCam() { chaseTargets(); camera.position.copy(camTarget); camera.up.copy(up); camera.lookAt(lookTarget); },
